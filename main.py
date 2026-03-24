@@ -1,7 +1,9 @@
 import os
 import hashlib
+import json
 import logging
-from datetime import datetime
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
@@ -19,46 +21,32 @@ logger = logging.getLogger(__name__)
 
 class NextcloudSync:
     def __init__(self):
-        remote_path = os.getenv(
-            "NEXTLOUD_REMOTE_PATH", "/Shared/Content/playerPublic/assets"
+        self.nextcloud_url_base = os.getenv(
+            "NEXTLOUD_URL", "https://nextcloud.1t.ru/remote.php/webdav"
         )
-        self.base_url = "https://nextcloud.1t.ru/remote.php/webdav"
-        self.remote_dir = remote_path.strip("/")
-        self.user = os.getenv("NEXTLOUD_USER", "")
-        self.password = os.getenv("NEXTLOUD_PASSWORD", "")
-        self.local_path = Path(
+        self.local_base = Path(
             os.path.expanduser(os.getenv("LOCAL_ASSETS_PATH", "./assets"))
         )
+        self.urls_to_check = [
+            path.strip()
+            for path in os.getenv(
+                "NEXTLOUD_SYNC_PATHS", "/Shared/Content/playerPublic/assets"
+            ).split(",")
+        ]
+        self.user = os.getenv("NEXTLOUD_USER", "")
+        self.password = os.getenv("NEXTLOUD_PASSWORD", "")
 
-        if not all([self.user, self.password, self.remote_dir]):
+        if not all([self.user, self.password]):
             raise ValueError(
-                "Missing required env vars: NEXTLOUD_URL, NEXTLOUD_USER, NEXTLOUD_PASSWORD"
+                "Missing required env vars: NEXTLOUD_USER, NEXTLOUD_PASSWORD"
             )
 
-        self.local_path.mkdir(parents=True, exist_ok=True)
+        self.local_base.mkdir(parents=True, exist_ok=True)
         self.session = requests.Session()
         self.session.auth = (self.user, self.password)
 
-    def _get_file_hash(self, filepath: Path) -> str:
-        if not filepath.exists():
-            return ""
-        sha256 = hashlib.sha256()
-        with open(filepath, "rb") as f:
-            for chunk in iter(lambda: f.read(8192), b""):
-                sha256.update(chunk)
-        return sha256.hexdigest()
-
-    def _get_remote_hash(self, remote_path: str) -> Optional[str]:
-        url = f"{self.base_url}/{self.remote_dir}/{remote_path}"
-        response = self.session.get(url)
-        if response.status_code == 200:
-            return hashlib.sha256(response.content).hexdigest()
-        return None
-
-    def list_remote_files(self, prefix: str = "") -> dict:
-        url = f"{self.base_url}/{self.remote_dir}"
-        if prefix:
-            url = f"{self.base_url}/{prefix}"
+    def list_remote_files(self, remote_path: str) -> dict:
+        url = f"{self.nextcloud_url_base}/{remote_path.strip('/')}"
 
         response = self.session.request("PROPFIND", url, headers={"Depth": "infinity"})
         if response.status_code not in (207, 200):
@@ -66,24 +54,23 @@ class NextcloudSync:
             return {}
 
         files = {}
-        import xml.etree.ElementTree as ET
-
         root = ET.fromstring(response.content)
-
         ns = {"d": "DAV:"}
+
         for response_elem in root.findall(".//d:response", ns):
             href = response_elem.find("d:href", ns)
             resourcetype = response_elem.find("d:resourcetype", ns)
             getetag = response_elem.find("d:getetag", ns)
+            getlastmodified = response_elem.find("d:getlastmodified", ns)
 
             if href is None:
                 continue
 
             href_text = href.text or ""
-            if "/assets/" in href_text:
-                path = href_text.split("/assets/", 1)[1]
+            if remote_path.strip("/") in href_text:
+                path = href_text.split(remote_path.strip("/"), 1)[1].lstrip("/")
             else:
-                path = href_text.replace(self.base_url, "").strip("/")
+                path = href_text.replace(self.nextcloud_url_base, "").strip("/")
 
             is_collection = (
                 resourcetype is not None
@@ -91,87 +78,114 @@ class NextcloudSync:
             )
 
             if not is_collection and path and not path.endswith("/"):
-                etag = getetag.text.strip('"') if getetag is not None else None
-                files[path] = etag
+                etag = None
+                if getetag is not None and getetag.text:
+                    etag = getetag.text.strip('"')
+                mtime = None
+                if getlastmodified is not None:
+                    lt = getlastmodified.text
+                    if lt:
+                        try:
+                            mtime = parsedate_to_datetime(lt).timestamp()
+                        except Exception:
+                            pass
+                files[path] = {"etag": etag, "mtime": mtime}
 
         return files
 
-    def download_file(self, remote_path: str) -> bool:
-        url = f"{self.base_url}/{self.remote_dir}/{remote_path}"
-        local_file = self.local_path / remote_path
+    def download_file(
+        self, remote_base: str, remote_file_path: str, local_path: Path
+    ) -> bool:
+        url = f"{self.nextcloud_url_base}/{remote_base.strip('/')}/{remote_file_path.strip('/')}"
 
         try:
             response = self.session.get(url, timeout=60)
             if response.status_code != 200:
                 logger.error(
-                    f"Failed to download {remote_path}: {response.status_code}"
+                    f"Failed to download {remote_file_path}: {response.status_code}"
                 )
                 return False
 
-            local_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(local_file, "wb") as f:
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            if local_path.exists():
+                local_path.unlink()
+            with open(local_path, "wb") as f:
                 f.write(response.content)
 
-            logger.info(f"Downloaded: {remote_path}")
+            logger.info(f"Downloaded: {remote_file_path}")
             return True
         except Exception as e:
-            logger.error(f"Error downloading {remote_path}: {e}")
+            logger.error(f"Error downloading {remote_file_path}: {e}")
             return False
 
     def sync(self):
-        logger.info(
-            f"Syncing from {self.base_url}/{self.remote_dir} to {self.local_path}"
-        )
+        for remote_path in self.urls_to_check:
+            logger.info(
+                f"Syncing from {self.nextcloud_url_base}/{remote_path} to {self.local_base}"
+            )
 
-        remote_files = self.list_remote_files()
-        logger.info(f"Found {len(remote_files)} remote files")
+            remote_files = self.list_remote_files(remote_path)
+            logger.info(f"Found {len(remote_files)} remote files")
 
-        to_download = []
-        etag_file = self.local_path / ".sync_etags.json"
+            to_download = []
 
-        import json
+            for remote_file_path, info in remote_files.items():
+                local_file_path = self.local_base / remote_file_path
+                remote_mtime = info.get("mtime")
 
-        local_etags = {}
-        if etag_file.exists():
-            local_etags = json.loads(etag_file.read_text())
+                if not local_file_path.exists():
+                    to_download.append((remote_file_path, local_file_path))
+                    continue
 
-        for remote_path, remote_etag in remote_files.items():
-            local_file = self.local_path / remote_path
+                if remote_mtime is not None:
+                    local_mtime = local_file_path.stat().st_mtime
+                    if remote_mtime > local_mtime:
+                        to_download.append((remote_file_path, local_file_path))
+                else:
+                    remote_etag = info.get("etag")
+                    if remote_etag:
+                        etag_file = self.local_base / ".sync_etags.json"
+                        local_etags = {}
+                        if etag_file.exists():
+                            local_etags = json.loads(etag_file.read_text())
+                        local_etag = local_etags.get(remote_file_path)
+                        if local_etag != remote_etag:
+                            to_download.append((remote_file_path, local_file_path))
 
-            if not local_file.exists():
-                to_download.append(remote_path)
+            logger.info(f"Need to download {len(to_download)} files")
+
+            if not to_download:
+                logger.info("All files are up to date")
                 continue
 
-            local_etag = local_etags.get(remote_path)
-            if remote_etag and local_etag != remote_etag:
-                to_download.append(remote_path)
+            downloaded = 0
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                futures = {
+                    executor.submit(
+                        self.download_file, remote_path, remote, local
+                    ): remote
+                    for remote, local in to_download
+                }
 
-        logger.info(f"Need to download {len(to_download)} files")
+                for future in as_completed(futures):
+                    if future.result():
+                        downloaded += 1
 
-        if not to_download:
-            logger.info("All files are up to date")
-            return
+            etag_file = self.local_base / ".sync_etags.json"
+            local_etags = {}
+            if etag_file.exists():
+                local_etags = json.loads(etag_file.read_text())
 
-        downloaded = 0
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = {
-                executor.submit(self.download_file, path): path for path in to_download
+            new_etags = {
+                remote: remote_files[remote]["etag"]
+                for remote, _ in to_download
+                if remote_files[remote].get("etag")
             }
+            if new_etags:
+                local_etags.update(new_etags)
+                etag_file.write_text(json.dumps(local_etags))
 
-            for future in as_completed(futures):
-                if future.result():
-                    downloaded += 1
-
-        import json
-
-        new_etags = {
-            path: remote_files[path] for path in to_download if remote_files[path]
-        }
-        if new_etags:
-            local_etags.update(new_etags)
-            etag_file.write_text(json.dumps(local_etags))
-
-        logger.info(f"Synced {downloaded}/{len(to_download)} files")
+            logger.info(f"Synced {downloaded}/{len(to_download)} files")
 
 
 if __name__ == "__main__":
