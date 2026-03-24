@@ -37,7 +37,7 @@ LOCAL_ASSETS_PATH=~/local/assets/path или Z://windows/path
 Specify multiple remote paths separated by commas:
 
 ```bash
-NEXTLOUD_SYNC_PATHS=/Shared/Content/playerPublic/assets,/Shared/Content/other,/Shared/another/path
+NEXTLOUD_SYNC_PATHS=/assets,/other,/another/path
 ```
 
 ## Usage
