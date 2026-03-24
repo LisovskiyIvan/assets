@@ -22,8 +22,9 @@ logger = logging.getLogger(__name__)
 class NextcloudSync:
     def __init__(self):
         self.nextcloud_url_base = os.getenv(
-            "NEXTLOUD_URL", "https://nextcloud.1t.ru/remote.php/webdav"
+            "NEXTLOUD_URL", "https://nextcloud.ru/"
         )
+        self.nextcloud_url_base += "remote.php/webdav"
         self.local_base = Path(
             os.path.expanduser(os.getenv("LOCAL_ASSETS_PATH", "./assets"))
         )

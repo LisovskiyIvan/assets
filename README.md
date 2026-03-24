@@ -25,10 +25,11 @@ uv sync
 Copy `.env.example` to `.env` and configure:
 
 ```bash
-NEXTLOUD_USER=your_login
-NEXTLOUD_PASSWORD=your_password
-NEXTLOUD_SYNC_PATHS=/Shared/Content/playerPublic/assets
-LOCAL_ASSETS_PATH=./assets
+NEXTLOUD_URL=https://nextcloud.ru/
+NEXTLOUD_SYNC_PATHS=path/to/your/dir,another/path
+NEXTLOUD_USER=login
+NEXTLOUD_PASSWORD=pass
+LOCAL_ASSETS_PATH=~/local/assets/path или Z://windows/path
 ```
 
 ### Multiple Sync Paths
@@ -56,7 +57,7 @@ uv run main.py
 
 ## How It Works
 
-1. Connects to Nextcloud via WebDAV at `https://nextcloud.1t.ru/remote.php/webdav`
+1. Connects to Nextcloud via WebDAV at `https://nextcloud.ru/remote.php/webdav`
 2. Iterates over all configured remote paths (comma-separated)
 3. Recursively lists all files in each remote path
 4. Checks local files against remote ETags stored in `.sync_etags.json`
