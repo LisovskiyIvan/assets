@@ -21,9 +21,7 @@ logger = logging.getLogger(__name__)
 
 class NextcloudSync:
     def __init__(self):
-        self.nextcloud_url_base = os.getenv(
-            "NEXTLOUD_URL", "https://nextcloud.ru/"
-        )
+        self.nextcloud_url_base = os.getenv("NEXTLOUD_URL", "https://nextcloud.ru/")
         self.nextcloud_url_base += "remote.php/webdav"
         self.local_base = Path(
             os.path.expanduser(os.getenv("LOCAL_ASSETS_PATH", "./assets"))
@@ -60,12 +58,18 @@ class NextcloudSync:
 
         for response_elem in root.findall(".//d:response", ns):
             href = response_elem.find("d:href", ns)
-            resourcetype = response_elem.find("d:resourcetype", ns)
-            getetag = response_elem.find("d:getetag", ns)
-            getlastmodified = response_elem.find("d:getlastmodified", ns)
+            propstat = response_elem.find("d:propstat", ns)
 
-            if href is None:
+            if href is None or propstat is None:
                 continue
+
+            prop = propstat.find("d:prop", ns)
+            if prop is None:
+                continue
+
+            getetag = prop.find("d:getetag", ns)
+            getlastmodified = prop.find("d:getlastmodified", ns)
+            resourcetype = prop.find("d:resourcetype", ns)
 
             href_text = href.text or ""
             if remote_path.strip("/") in href_text:
