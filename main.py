@@ -5,6 +5,7 @@ import logging
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from urllib.parse import unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
@@ -71,7 +72,7 @@ class NextcloudSync:
             getlastmodified = prop.find("d:getlastmodified", ns)
             resourcetype = prop.find("d:resourcetype", ns)
 
-            href_text = href.text or ""
+            href_text = unquote(href.text or "")
             if remote_path.strip("/") in href_text:
                 path = href_text.split(remote_path.strip("/"), 1)[1].lstrip("/")
             else:
@@ -99,7 +100,11 @@ class NextcloudSync:
         return files
 
     def download_file(
-        self, remote_base: str, remote_file_path: str, local_path: Path
+        self,
+        remote_base: str,
+        remote_file_path: str,
+        local_path: Path,
+        remote_mtime: Optional[float] = None,
     ) -> bool:
         url = f"{self.nextcloud_url_base}/{remote_base.strip('/')}/{remote_file_path.strip('/')}"
 
@@ -116,6 +121,9 @@ class NextcloudSync:
                 local_path.unlink()
             with open(local_path, "wb") as f:
                 f.write(response.content)
+
+            if remote_mtime is not None:
+                os.utime(local_path, (remote_mtime, remote_mtime))
 
             logger.info(f"Downloaded: {remote_file_path}")
             return True
@@ -139,13 +147,17 @@ class NextcloudSync:
                 remote_mtime = info.get("mtime")
 
                 if not local_file_path.exists():
-                    to_download.append((remote_file_path, local_file_path))
+                    to_download.append(
+                        (remote_file_path, local_file_path, remote_mtime)
+                    )
                     continue
 
                 if remote_mtime is not None:
                     local_mtime = local_file_path.stat().st_mtime
                     if remote_mtime > local_mtime:
-                        to_download.append((remote_file_path, local_file_path))
+                        to_download.append(
+                            (remote_file_path, local_file_path, remote_mtime)
+                        )
                 else:
                     remote_etag = info.get("etag")
                     if remote_etag:
@@ -155,7 +167,9 @@ class NextcloudSync:
                             local_etags = json.loads(etag_file.read_text())
                         local_etag = local_etags.get(remote_file_path)
                         if local_etag != remote_etag:
-                            to_download.append((remote_file_path, local_file_path))
+                            to_download.append(
+                                (remote_file_path, local_file_path, remote_mtime)
+                            )
 
             logger.info(f"Need to download {len(to_download)} files")
 
@@ -167,9 +181,9 @@ class NextcloudSync:
             with ThreadPoolExecutor(max_workers=8) as executor:
                 futures = {
                     executor.submit(
-                        self.download_file, remote_path, remote, local
+                        self.download_file, remote_path, remote, local, mtime
                     ): remote
-                    for remote, local in to_download
+                    for remote, local, mtime in to_download
                 }
 
                 for future in as_completed(futures):
@@ -183,7 +197,7 @@ class NextcloudSync:
 
             new_etags = {
                 remote: remote_files[remote]["etag"]
-                for remote, _ in to_download
+                for remote, _, _ in to_download
                 if remote_files[remote].get("etag")
             }
             if new_etags:
